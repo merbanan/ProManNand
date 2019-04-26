@@ -105,6 +105,11 @@ Device Status:     0x0001
 #define VENDOR_ID 0x05a9
 #define PRODUCT_ID 0x7814
 
+#define BULK_EP_OUT     0x01
+//#define BULK_EP_IN      0x08
+
+#define PACKET_CTRL_LEN 0x4
+
 // HID Class-Specific Requests values. See section 7.2 of the HID specifications 
 #define HID_GET_REPORT                0x01 
 #define HID_GET_IDLE                  0x02 
@@ -116,9 +121,10 @@ Device Status:     0x0001
 #define HID_REPORT_TYPE_OUTPUT        0x02 
 #define HID_REPORT_TYPE_FEATURE       0x03 
 
-#define CTRL_IN      LIBUSB_ENDPOINT_IN |LIBUSB_REQUEST_TYPE_CLASS|LIBUSB_RECIPIENT_INTERFACE 
-#define CTRL_OUT     LIBUSB_ENDPOINT_OUT|LIBUSB_REQUEST_TYPE_CLASS|LIBUSB_RECIPIENT_INTERFACE
+#define CTRL_IN      LIBUSB_ENDPOINT_IN |LIBUSB_REQUEST_TYPE_VENDOR|LIBUSB_RECIPIENT_INTERFACE
+#define CTRL_OUT     LIBUSB_ENDPOINT_OUT|LIBUSB_REQUEST_TYPE_VENDOR|LIBUSB_RECIPIENT_INTERFACE
 
+const static int TIMEOUT=5000; /* timeout in ms */
 
 void print_usage(void) {
     printf("proman-nand version 1.0\n");     
@@ -126,20 +132,54 @@ void print_usage(void) {
     return;
 }
 
+int pm_blink_led(struct libusb_device_handle *devh) {
+    int i,r;
+    int transferred = 0;
+    unsigned char blink_led_cmd[] = {0x55, 0xaa, 0x5f, 0xcc, 0xcc, 0xcc, 0x66, 0xaa};
+    int blink_led_cmd_len = 8;
+
+
+    r = libusb_bulk_transfer(devh, BULK_EP_OUT, blink_led_cmd, blink_led_cmd_len, &transferred, 0);
+    if (r < 0) {
+        fprintf(stderr, "Control Out error %d\n", r);
+        return r;
+    }
+    return r;
+}
+
+int pm_hardware_version(struct libusb_device_handle *devh) {
+    int i,r;
+    uint8_t answer[PACKET_CTRL_LEN] = {0};
+
+    /* send request */
+    r = libusb_control_transfer(devh, CTRL_IN, 91, 0x0000, 0x00000, answer, PACKET_CTRL_LEN, TIMEOUT);
+    if (r < 0) {
+        fprintf(stderr, "Urb control in error %d\n", r);
+        return r;
+    }
+    printf("Programmer version: 0x%02x%02x%02x%02x\n", answer[3], answer[2], answer[1], answer[0]);
+
+    return r;
+}
+
 int main(int argc, char** argv)
 {
     int verbose = 0;
     int probe = 0;
 	int option = 0;
+	int blink_led = 0;
     int r;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"vd")) != -1) {
+    while ((option = getopt(argc, argv,"hvdl")) != -1) {
         switch (option) {
             case 'v': verbose = 1;
                 break;
             case 'd':  probe = 1;
                 break;
+            case 'l': blink_led = 1;
+                break;
+            case 'h':
             default: print_usage(); 
                  exit(EXIT_FAILURE);
         }
@@ -160,17 +200,26 @@ int main(int argc, char** argv)
 
     if (verbose) fprintf(stdout, "Successfully found the ProMan device\n"); 
 
-	r = libusb_detach_kernel_driver (devh, 0);
-    if (r < 0) { 
-        if (verbose) fprintf(stderr, "libusb_detach_kernel_driver error %d\n", r); 
-    }
-
     r = libusb_claim_interface(devh, 0); 
     if (r < 0) { 
-        fprintf(stderr, "libusb_claim_interface error %d\n", r); 
-        goto out; 
+        fprintf(stderr, "libusb_claim_interface error %d, trying to detach kernel driver\n", r);
+
+        /* Claim failed, try with detaching kernel driver */
+	    r = libusb_detach_kernel_driver (devh, 0);
+        if (r < 0) {
+            if (verbose) fprintf(stderr, "libusb_detach_kernel_driver error %d\n", r);
+        }
+
+        r = libusb_claim_interface(devh, 0);
+        if (r < 0) {
+            fprintf(stderr, "libusb_claim_interface error %d\n", r);
+            goto out;
+        }
     }
 
+    if (blink_led) pm_blink_led(devh);
+
+    if (probe) pm_hardware_version(devh);
 
     libusb_release_interface(devh, 0); 
 out: 
