@@ -101,6 +101,7 @@ Device Status:     0x0001
 #include <sys/types.h>
 #include <inttypes.h>
 #include <byteswap.h>
+#include <unistd.h>
 #include <libusb-1.0/libusb.h> 
 
 #define VENDOR_ID 0x05a9
@@ -129,6 +130,10 @@ Device Status:     0x0001
 #define READ_ID_LEN             8
 #define FIRMWARE_VERSION        91
 #define FIRMWARE_VERSION_LEN    4
+#define BAD_BLOCK_LIST          87
+#define BAD_BLOCK_LIST_LEN      8
+#define ERASE_STATUS            90
+#define ERASE_STATUS_LEN        8
 
 const static int TIMEOUT=5000; /* timeout in ms */
 
@@ -177,13 +182,67 @@ int pm_send_ctrl_in(struct libusb_device_handle *devh, int request_type, uint8_t
     }
 }
 
+int pm_send_bulk_out(struct libusb_device_handle *devh, uint8_t* bulk_cmd, int bulk_cmd_len) {
+    int r;
+    int transferred = 0;
+    r = libusb_bulk_transfer(devh, BULK_EP_OUT, bulk_cmd, bulk_cmd_len, &transferred, 0);
+    if (r < 0) {
+        fprintf(stderr, "Bulk Out error %d\n", r);
+        return r;
+    }
+    return r;
+}
+
+
+int pm_read_bbl(struct libusb_device_handle *devh) {
+    int i,r;
+    uint8_t ans_buf[BAD_BLOCK_LIST_LEN] = {0};
+    int transferred = 0;
+    uint8_t read_bbl_cmd[] = {0x55, 0xaa, 0x57, 0x00, 0xcc, 0xcc, 0x66, 0xaa};
+    int read_bbl_cmd_len = 8;
+    uint16_t bbl_entry1 = 0;
+    uint16_t bbl_entry2 = 0;
+    uint16_t bbl_tmp = 0;
+    int cnt = 128;
+
+    pm_send_bulk_out(devh, read_bbl_cmd, read_bbl_cmd_len);
+
+    while ((bbl_tmp != 0xFFFF) && cnt) {
+        pm_send_ctrl_in(devh, BAD_BLOCK_LIST, ans_buf, BAD_BLOCK_LIST_LEN);
+
+        bbl_tmp = ans_buf[2]<<8 | ans_buf[3];
+        if ((bbl_tmp != 0xfffa) & (bbl_tmp != 0xffff)) printf("BBL: Block %d marked bad\n", bbl_tmp);
+        bbl_tmp = ans_buf[0]<<8 | ans_buf[1];
+        if ((bbl_tmp != 0xfffa) & (bbl_tmp != 0xffff)) printf("BBL: Block %d marked bad\n", bbl_tmp);
+
+        cnt--;
+    }
+}
+
+
+int pm_erase_chip(struct libusb_device_handle *devh) {
+    int i;
+    uint8_t ans_buf[BAD_BLOCK_LIST_LEN] = {0};
+    int transferred = 0;
+    uint8_t erase_chip_cmd[] = {0x55, 0xaa, 0x58, 0xcc, 0x00, 0x00, 0x66, 0xaa};
+    int erase_chip_cmd_len = 8;
+
+
+    for (i=0 ; i<40 ; i++) {
+        pm_send_bulk_out(devh, erase_chip_cmd, erase_chip_cmd_len);
+        usleep(100000);
+        pm_send_ctrl_in(devh, ERASE_STATUS, ans_buf, ERASE_STATUS_LEN);
+        printf("Erase chip: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
+    }
+}
+
 
 int pm_hardware_version(struct libusb_device_handle *devh) {
     int i,r;
     uint8_t ans_buf[FIRMWARE_VERSION_LEN] = {0};
 
     pm_send_ctrl_in(devh, FIRMWARE_VERSION, ans_buf, FIRMWARE_VERSION_LEN);
-    printf("READ_ID: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
+    printf("Firmware version: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
 };
 
 
@@ -203,10 +262,12 @@ int main(int argc, char** argv)
 	int option = 0;
 	int blink_led = 0;
     int read_id = 0;
+    int read_bbl = 0;
+    int erase_chip = 0;
     int r;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"hvdli")) != -1) {
+    while ((option = getopt(argc, argv,"EBhvdli")) != -1) {
         switch (option) {
             case 'v': verbose = 1;
                 break;
@@ -215,6 +276,10 @@ int main(int argc, char** argv)
             case 'l': blink_led = 1;
                 break;
             case 'i': read_id = 1;
+                break;
+            case 'B': read_bbl = 1;
+                break;
+            case 'E': erase_chip = 1;
                 break;
             case 'h':
             default: print_usage(); 
@@ -262,6 +327,12 @@ int main(int argc, char** argv)
 
     if (read_id) pm_read_id(devh);
 
+    if (read_bbl) pm_read_bbl(devh);
+
+    if (erase_chip) {
+        pm_read_id(devh);
+        pm_erase_chip(devh);
+    }
 
     libusb_release_interface(devh, 0); 
 out: 
