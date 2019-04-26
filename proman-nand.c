@@ -100,6 +100,7 @@ Device Status:     0x0001
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <inttypes.h>
+#include <byteswap.h>
 #include <libusb-1.0/libusb.h> 
 
 #define VENDOR_ID 0x05a9
@@ -124,7 +125,19 @@ Device Status:     0x0001
 #define CTRL_IN      LIBUSB_ENDPOINT_IN |LIBUSB_REQUEST_TYPE_VENDOR|LIBUSB_RECIPIENT_INTERFACE
 #define CTRL_OUT     LIBUSB_ENDPOINT_OUT|LIBUSB_REQUEST_TYPE_VENDOR|LIBUSB_RECIPIENT_INTERFACE
 
+#define READ_ID                 86
+#define READ_ID_LEN             8
+#define FIRMWARE_VERSION        91
+#define FIRMWARE_VERSION_LEN    4
+
 const static int TIMEOUT=5000; /* timeout in ms */
+
+uint32_t swap_uint32( uint32_t val )
+{
+    val = ((val << 8) & 0xFF00FF00 ) | ((val >> 8) & 0xFF00FF ); 
+    return (val << 16) | (val >> 16);
+}
+
 
 void print_usage(void) {
     printf("proman-nand version 1.0\n");     
@@ -147,20 +160,41 @@ int pm_blink_led(struct libusb_device_handle *devh) {
     return r;
 }
 
-int pm_hardware_version(struct libusb_device_handle *devh) {
-    int i,r;
-    uint8_t answer[PACKET_CTRL_LEN] = {0};
-
+int pm_send_ctrl_in(struct libusb_device_handle *devh, int request_type, uint8_t* buf, int buf_len) {
+    int r,i;
+    uint8_t tmp_buf[4] = {0};
+    uint32_t* tmp;
     /* send request */
-    r = libusb_control_transfer(devh, CTRL_IN, 91, 0x0000, 0x00000, answer, PACKET_CTRL_LEN, TIMEOUT);
+    r = libusb_control_transfer(devh, CTRL_IN, request_type, 0x0000, 0x00000, buf, buf_len, TIMEOUT);
     if (r < 0) {
         fprintf(stderr, "Urb control in error %d\n", r);
         return r;
     }
-    printf("Programmer version: 0x%02x%02x%02x%02x\n", answer[3], answer[2], answer[1], answer[0]);
-
-    return r;
+    /* Swap answer buffer */
+    for (i=0 ; i<r ; i+=4) {
+        tmp = (uint32_t*)&buf[i];
+        *tmp = swap_uint32(*tmp);
+    }
 }
+
+
+int pm_hardware_version(struct libusb_device_handle *devh) {
+    int i,r;
+    uint8_t ans_buf[FIRMWARE_VERSION_LEN] = {0};
+
+    pm_send_ctrl_in(devh, FIRMWARE_VERSION, ans_buf, FIRMWARE_VERSION_LEN);
+    printf("READ_ID: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
+};
+
+
+int pm_read_id(struct libusb_device_handle *devh) {
+    int i,r;
+    uint8_t ans_buf[READ_ID_LEN] = {0};
+
+    pm_send_ctrl_in(devh, READ_ID, ans_buf, READ_ID_LEN);
+    printf("READ_ID: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
+};
+
 
 int main(int argc, char** argv)
 {
@@ -168,16 +202,19 @@ int main(int argc, char** argv)
     int probe = 0;
 	int option = 0;
 	int blink_led = 0;
+    int read_id = 0;
     int r;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"hvdl")) != -1) {
+    while ((option = getopt(argc, argv,"hvdli")) != -1) {
         switch (option) {
             case 'v': verbose = 1;
                 break;
             case 'd':  probe = 1;
                 break;
             case 'l': blink_led = 1;
+                break;
+            case 'i': read_id = 1;
                 break;
             case 'h':
             default: print_usage(); 
@@ -217,9 +254,14 @@ int main(int argc, char** argv)
         }
     }
 
+    /* Command line options */
+
     if (blink_led) pm_blink_led(devh);
 
     if (probe) pm_hardware_version(devh);
+
+    if (read_id) pm_read_id(devh);
+
 
     libusb_release_interface(devh, 0); 
 out: 
