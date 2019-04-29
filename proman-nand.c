@@ -226,14 +226,25 @@ int pm_erase_chip(struct libusb_device_handle *devh) {
     int transferred = 0;
     uint8_t erase_chip_cmd[] = {0x55, 0xaa, 0x58, 0xcc, 0x00, 0x00, 0x66, 0xaa};
     int erase_chip_cmd_len = 8;
+    int total_blocks, done_blocks, good_blocks;
 
+    /* Get total block amount */
+    pm_send_bulk_out(devh, erase_chip_cmd, erase_chip_cmd_len);
+//    usleep(10000);  // not sure this is needed.
+    pm_send_ctrl_in(devh, ERASE_STATUS, ans_buf, ERASE_STATUS_LEN);
+    total_blocks = (ans_buf[4] << 8) | ans_buf[5];
+    done_blocks = (ans_buf[6] << 8) | ans_buf[7];
 
-    for (i=0 ; i<40 ; i++) {
+    while (done_blocks < total_blocks) {
         pm_send_bulk_out(devh, erase_chip_cmd, erase_chip_cmd_len);
-        usleep(100000);
+//        usleep(10000);
         pm_send_ctrl_in(devh, ERASE_STATUS, ans_buf, ERASE_STATUS_LEN);
-        printf("Erase chip: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
+        done_blocks = (ans_buf[6] << 8) | ans_buf[7];
+//        printf("Erase chip: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
     }
+    good_blocks = (ans_buf[0] << 8) | ans_buf[1];
+    printf("ERASE_BLOCKS:\n");
+    printf("Total blocks: %d\nTotal good blocks erased: %d\n", total_blocks, good_blocks);
 }
 
 
@@ -330,7 +341,7 @@ int main(int argc, char** argv)
     if (read_bbl) pm_read_bbl(devh);
 
     if (erase_chip) {
-        pm_read_id(devh);
+        pm_read_id(devh);   // This might be needed for the programmer to understand chip geometry
         pm_erase_chip(devh);
     }
 
