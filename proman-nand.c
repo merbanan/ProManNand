@@ -333,7 +333,7 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
     read_block2_cmd[5] = (offset&0x0000FF00) >> 8;
     read_block2_cmd[4] = (offset&0x000000FF);
 
-    end_offset = (block_size * blocks_to_read) -1;
+    end_offset = offset + (block_size * blocks_to_read) -1;
     read_block2_cmd[11] = (end_offset&0xFF000000) >> 24;
     read_block2_cmd[10] = (end_offset&0x00FF0000) >> 16;
     read_block2_cmd[9] = (end_offset&0x0000FF00) >> 8;
@@ -358,18 +358,18 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
             printf("\n");
 
     while (pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN) && (bytes_read < bytes_to_read) && fail_cnt--) {
-        printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
+//        printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
         done_bytes = (ans_buf[4] << 24) | (ans_buf[5] << 16) | (ans_buf[6] << 8) | ans_buf[7];
-        printf("READ_BLOCK: bytes done=%d\n", done_bytes);
+//        printf("READ_BLOCK: bytes done=%d\n", done_bytes);
         if (ans_buf[1] == 0x12) {
             int buffer_size = TRANSFER_BUF_LEN;
             /* Data ready for reading*/
-            printf("SENDING BULK_IN:\n");
+//            printf("SENDING BULK_IN:\n");
             if ((bytes_to_read - bytes_read) < TRANSFER_BUF_LEN)
                  buffer_size=bytes_to_read - bytes_read;
             bytes_in_bulk = pm_send_bulk_in(devh, transfer_buffer, buffer_size);
             bytes_read+=bytes_in_bulk;
-            printf("BULK_IN: read size=%d < bytes_to_read=%d %d\n", bytes_read, bytes_to_read, bytes_in_bulk);
+//            printf("BULK_IN: read size=%d < bytes_to_read=%d %d\n", bytes_read, bytes_to_read, bytes_in_bulk);
             fwrite(transfer_buffer, bytes_in_bulk, 1, out_file);
         } else if (ans_buf[1] == 0x3b){
             /* Data not ready for reading, wait a while */
@@ -425,7 +425,7 @@ int main(int argc, char** argv)
                 break;
             case 'E': erase_chip = 1;
                 break;
-            case 'r': read_offset = atoi(optarg); read = 1;
+            case 'r': read_offset = strtol(optarg, NULL, 16); read = 1;
                 break;
             case 'b': read_blocks = atoi(optarg);
                 break;
