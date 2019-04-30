@@ -198,13 +198,13 @@ int pm_send_bulk_out(struct libusb_device_handle *devh, uint8_t* bulk_cmd, int b
 
 int pm_send_bulk_in(struct libusb_device_handle *devh, uint8_t* buf, int buf_len) {
     int r;
-    int transferred = 0;
-    r = libusb_bulk_transfer(devh, BULK_EP_IN, buf, buf_len, &transferred, TIMEOUT);
+    int transfered = 0;
+    r = libusb_bulk_transfer(devh, BULK_EP_IN, buf, buf_len, &transfered, TIMEOUT);
     if (r < 0) {
         fprintf(stderr, "Bulk In error %d\n", r);
         return r;
     }
-    return transferred;
+    return transfered;
 }
 
 
@@ -291,23 +291,25 @@ int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, 
                 switch (ans_buf[1]) {
                     case 0xf1:
                     default:
-                        ps = (ans_buf[3]&0x03)>>4;
+                        ps = (ans_buf[3]&0x03);
                         *page_size = (1<<ps)*1024;
                         bs = (ans_buf[3]&0x30)>>4;
                         *block_size = (1<<bs)*65536;
                         sa = (ans_buf[3]&0x04)>>2;
-                        *spare_area_size = (ps/512) * ((1<<sa)*8);
+                        *spare_area_size = (*page_size/512) * ((1<<sa)*8);
                         break;
                 }
         }
     }
+    printf("end spare_area_size: %d, %d, %d, %d\n", *spare_area_size, *page_size, *block_size, *spare_area_size);
 };
 
-int pm_read_blocks(struct libusb_device_handle *devh, int offset, int blocks_to_read, int spare_area) {
+int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset, int blocks_to_read, int spare_area) {
     int i, r, ret = 1;
     uint8_t ans_buf[STATUS_LEN] = {0};
     int transferred = 0;
     int block_size, page_size, spare_area_size;
+    int pages_per_block;
     int end_offset;
     int fail_cnt=10000;
     int bytes_to_read = 0, bytes_read = 0, bytes_in_bulk;
@@ -341,8 +343,10 @@ int pm_read_blocks(struct libusb_device_handle *devh, int offset, int blocks_to_
     read_block2_cmd[13] = spare_area;
 
     if (!spare_area) spare_area_size = 0;
-
-    bytes_to_read = blocks_to_read*(block_size + spare_area_size);
+    pages_per_block = block_size/page_size;
+    bytes_to_read = blocks_to_read*(block_size + spare_area_size*pages_per_block);
+    printf("end spare_area_size: %d\n", spare_area_size);
+    printf("Bytes to read: %d\n", bytes_to_read);
 
 
     printf("end offset: %x\n", end_offset);
@@ -351,15 +355,22 @@ int pm_read_blocks(struct libusb_device_handle *devh, int offset, int blocks_to_
 
     pm_send_bulk_out(devh, read_block2_cmd, read_block2_cmd_len);
 
+            printf("\n");
+
     while (pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN) && (bytes_read < bytes_to_read) && fail_cnt--) {
         printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
         done_bytes = (ans_buf[4] << 24) | (ans_buf[5] << 16) | (ans_buf[6] << 8) | ans_buf[7];
         printf("READ_BLOCK: bytes done=%d\n", done_bytes);
         if (ans_buf[1] == 0x12) {
+            int buffer_size = TRANSFER_BUF_LEN;
             /* Data ready for reading*/
-            bytes_in_bulk = pm_send_bulk_in(devh, transfer_buffer, TRANSFER_BUF_LEN);
+            printf("SENDING BULK_IN:\n");
+            if ((bytes_to_read - bytes_read) < TRANSFER_BUF_LEN)
+                 buffer_size=bytes_to_read - bytes_read;
+            bytes_in_bulk = pm_send_bulk_in(devh, transfer_buffer, buffer_size);
             bytes_read+=bytes_in_bulk;
-            printf("BULK_IN: read size=%d < bytes_to_read=%d\n", bytes_read, bytes_to_read);
+            printf("BULK_IN: read size=%d < bytes_to_read=%d %d\n", bytes_read, bytes_to_read, bytes_in_bulk);
+            fwrite(transfer_buffer, bytes_in_bulk, 1, out_file);
         } else if (ans_buf[1] == 0x3b){
             /* Data not ready for reading, wait a while */
             usleep(100000);
@@ -387,21 +398,28 @@ int main(int argc, char** argv)
     int read_bbl = 0;
     int erase_chip = 0;
     int spare_area = 0;
-    int read = 0;
+    int read = 0, write = 0;
     int read_blocks = 0;
     int read_offset = 0;
     int r;
+    const char* input_file = NULL;
+    const char* output_file = NULL;
+    FILE *in_file = NULL, *out_file = NULL;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"EBhvdlir:b:s")) != -1) {
+    while ((option = getopt(argc, argv,"EBhvdlIr:b:si:o:")) != -1) {
         switch (option) {
+            case 'i' : input_file = optarg;
+                break;
+            case 'o' : output_file = optarg;
+                break;
             case 'v': verbose = 1;
                 break;
             case 'd': probe = 1;
                 break;
             case 'l': blink_led = 1;
                 break;
-            case 'i': read_id = 1;
+            case 'I': read_id = 1;
                 break;
             case 'B': read_bbl = 1;
                 break;
@@ -466,9 +484,35 @@ int main(int argc, char** argv)
         pm_erase_chip(devh);
     }
 
+
+    /* I/O */
+
     if (read) {
-        pm_read_blocks(devh, read_offset, read_blocks, spare_area);
+        if (output_file == NULL) {
+            printf("-o output file name is missing\n");
+            goto out;
+        }
+        out_file = fopen(output_file,"wb");
+        if (out_file == NULL) {
+            printf("Out file open error\n");
+            goto out;
+        }
+
+        pm_read_blocks(devh, out_file, read_offset, read_blocks, spare_area);
     }
+
+    if (write) {
+        if (input_file == NULL) {
+            printf("-i input file name is missing\n");
+            goto out;
+        }
+        in_file = fopen(input_file,"r");
+        if (in_file == NULL) {
+            printf("In file open error\n");
+            goto out;
+        }
+    }
+
 
     libusb_release_interface(devh, 0); 
 out: 
