@@ -108,7 +108,7 @@ Device Status:     0x0001
 #define PRODUCT_ID 0x7814
 
 #define BULK_EP_OUT     0x01
-//#define BULK_EP_IN      0x08
+#define BULK_EP_IN      0x81
 
 #define PACKET_CTRL_LEN 0x4
 
@@ -136,6 +136,8 @@ Device Status:     0x0001
 #define STATUS_LEN        8
 
 const static int TIMEOUT=5000; /* timeout in ms */
+#define TRANSFER_BUF_LEN 16384
+uint8_t transfer_buffer[TRANSFER_BUF_LEN] = {0};
 
 uint32_t swap_uint32( uint32_t val )
 {
@@ -180,6 +182,7 @@ int pm_send_ctrl_in(struct libusb_device_handle *devh, int request_type, uint8_t
         tmp = (uint32_t*)&buf[i];
         *tmp = swap_uint32(*tmp);
     }
+    return 1;
 }
 
 int pm_send_bulk_out(struct libusb_device_handle *devh, uint8_t* bulk_cmd, int bulk_cmd_len) {
@@ -191,6 +194,17 @@ int pm_send_bulk_out(struct libusb_device_handle *devh, uint8_t* bulk_cmd, int b
         return r;
     }
     return r;
+}
+
+int pm_send_bulk_in(struct libusb_device_handle *devh, uint8_t* buf, int buf_len) {
+    int r;
+    int transferred = 0;
+    r = libusb_bulk_transfer(devh, BULK_EP_IN, buf, buf_len, &transferred, TIMEOUT);
+    if (r < 0) {
+        fprintf(stderr, "Bulk In error %d\n", r);
+        return r;
+    }
+    return transferred;
 }
 
 
@@ -257,40 +271,51 @@ int pm_hardware_version(struct libusb_device_handle *devh) {
     printf("Firmware version: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
 };
 
-int samsung_ecf1_blocks_sizes[] = {65536, 131072, 262144, 524288};
 
 int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, int* page_size, int* spare_area_size) {
-    int i,r, bs_idx;
+    int i,r, bs, sa, ps;
     uint8_t ans_buf[READ_ID_LEN] = {0};
 
     pm_send_ctrl_in(devh, READ_ID, ans_buf, READ_ID_LEN);
     if (verbose) printf("READ_ID: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
 
+
     /* parse chip vendor id data */
     if (block_size && page_size && spare_area_size) {
+        *block_size=0;
+        *page_size=0;
+        *spare_area_size=0;
+
         switch (ans_buf[0]) {
             case 0xec:
                 switch (ans_buf[1]) {
                     case 0xf1:
                     default:
-                        bs_idx = (ans_buf[3]&0x30)>>4;
-                        *block_size = samsung_ecf1_blocks_sizes[bs_idx];
+                        ps = (ans_buf[3]&0x03)>>4;
+                        *page_size = (1<<ps)*1024;
+                        bs = (ans_buf[3]&0x30)>>4;
+                        *block_size = (1<<bs)*65536;
+                        sa = (ans_buf[3]&0x04)>>2;
+                        *spare_area_size = (ps/512) * ((1<<sa)*8);
                         break;
                 }
         }
     }
 };
 
-int pm_read_blocks(struct libusb_device_handle *devh, int offset, int blocks, int spare_area) {
-    int i, r;
+int pm_read_blocks(struct libusb_device_handle *devh, int offset, int blocks_to_read, int spare_area) {
+    int i, r, ret = 1;
     uint8_t ans_buf[STATUS_LEN] = {0};
     int transferred = 0;
     int block_size, page_size, spare_area_size;
     int end_offset;
+    int fail_cnt=10000;
+    int bytes_to_read = 0, bytes_read = 0, bytes_in_bulk;
+    int done_bytes;
     uint8_t read_block1_cmd[] = {0x55, 0xaa, 0x5f, 0xcc, 0xcc, 0xcc, 0x66, 0xaa};
     int read_block1_cmd_len = 8;
     uint8_t read_block2_cmd[] = {0x55, 0xaa, 0x5a, 0xcc, 0x11, 0x11, 0x11, 0x11,
-                                 0x22, 0x22, 0x22, 0x22, 0x01, 0x01, 0x00, 0x01,
+                                 0x22, 0x22, 0x22, 0x22, 0x01, 0x00, 0x00, 0x01,
                                  0xcc, 0xcc, 0x66, 0xaa};
     int read_block2_cmd_len = 20;
 
@@ -306,17 +331,49 @@ int pm_read_blocks(struct libusb_device_handle *devh, int offset, int blocks, in
     read_block2_cmd[5] = (offset&0x0000FF00) >> 8;
     read_block2_cmd[4] = (offset&0x000000FF);
 
-    end_offset = (block_size * blocks) -1;
+    end_offset = (block_size * blocks_to_read) -1;
     read_block2_cmd[11] = (end_offset&0xFF000000) >> 24;
     read_block2_cmd[10] = (end_offset&0x00FF0000) >> 16;
     read_block2_cmd[9] = (end_offset&0x0000FF00) >> 8;
     read_block2_cmd[8] = (end_offset&0x000000FF);
 
-    /* Read spare area */
-    read_block2_cmd[13] = !spare_area;
+    /* Read spare area ?*/
+    read_block2_cmd[13] = spare_area;
+
+    if (!spare_area) spare_area_size = 0;
+
+    bytes_to_read = blocks_to_read*(block_size + spare_area_size);
+
 
     printf("end offset: %x\n", end_offset);
-    printf("Erase chip: %02x %02x %02x %02x %02x %02x %02x %02x\n", read_block2_cmd[4], read_block2_cmd[5], read_block2_cmd[6], read_block2_cmd[7], read_block2_cmd[8], read_block2_cmd[9], read_block2_cmd[10], read_block2_cmd[11]);
+    printf("Read blocks: %02x %02x %02x %02x %02x %02x %02x %02x\n", read_block2_cmd[4], read_block2_cmd[5], read_block2_cmd[6], read_block2_cmd[7], read_block2_cmd[8], read_block2_cmd[9], read_block2_cmd[10], read_block2_cmd[11]);
+    printf("Control bytes: %02x %02x %02x %02x\n", read_block2_cmd[12], read_block2_cmd[13], read_block2_cmd[14], read_block2_cmd[15]);
+
+    pm_send_bulk_out(devh, read_block2_cmd, read_block2_cmd_len);
+
+    while (pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN) && (bytes_read < bytes_to_read) && fail_cnt--) {
+        printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
+        done_bytes = (ans_buf[4] << 24) | (ans_buf[5] << 16) | (ans_buf[6] << 8) | ans_buf[7];
+        printf("READ_BLOCK: bytes done=%d\n", done_bytes);
+        if (ans_buf[1] == 0x12) {
+            /* Data ready for reading*/
+            bytes_in_bulk = pm_send_bulk_in(devh, transfer_buffer, TRANSFER_BUF_LEN);
+            bytes_read+=bytes_in_bulk;
+            printf("BULK_IN: read size=%d < bytes_to_read=%d\n", bytes_read, bytes_to_read);
+        } else if (ans_buf[1] == 0x3b){
+            /* Data not ready for reading, wait a while */
+            usleep(100000);
+        } else {
+            /* Unknown error, abort */
+            return -1;
+        }
+    }
+    pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN);
+    done_bytes = (ans_buf[4] << 24) | (ans_buf[5] << 16) | (ans_buf[6] << 8) | ans_buf[7];
+    printf("READ_BLOCK: bytes done=%d\n", done_bytes);
+
+//    printf("READ_BLOCK: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
+    return ret;
 }
 
 
@@ -336,7 +393,7 @@ int main(int argc, char** argv)
     int r;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"EBhvdlir:b:")) != -1) {
+    while ((option = getopt(argc, argv,"EBhvdlir:b:s")) != -1) {
         switch (option) {
             case 'v': verbose = 1;
                 break;
