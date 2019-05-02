@@ -228,6 +228,10 @@ int pm_read_bbl(struct libusb_device_handle *devh) {
         if ((bbl_tmp != 0xfffa) & (bbl_tmp != 0xffff)) printf("BBL: Block %d marked bad\n", bbl_tmp);
         bbl_tmp = ans_buf[0]<<8 | ans_buf[1];
         if ((bbl_tmp != 0xfffa) & (bbl_tmp != 0xffff)) printf("BBL: Block %d marked bad\n", bbl_tmp);
+        bbl_tmp = ans_buf[4]<<8 | ans_buf[5];
+        if ((bbl_tmp != 0xfffa) & (bbl_tmp != 0xffff)) printf("BBL: Block %d marked bad\n", bbl_tmp);
+        bbl_tmp = ans_buf[6]<<8 | ans_buf[7];
+        if ((bbl_tmp != 0xfffa) & (bbl_tmp != 0xffff)) printf("BBL: Block %d marked bad\n", bbl_tmp);
 
         cnt--;
     }
@@ -300,8 +304,8 @@ int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, 
                         break;
                 }
         }
+        printf("end spare_area_size: %d, %d, %d, %d\n", *spare_area_size, *page_size, *block_size, *spare_area_size);
     }
-    printf("end spare_area_size: %d, %d, %d, %d\n", *spare_area_size, *page_size, *block_size, *spare_area_size);
 };
 
 int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset, int blocks_to_read, int spare_area) {
@@ -328,16 +332,16 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
 
     pm_read_id(devh, 0, &block_size, &page_size, &spare_area_size);
 
-    read_block2_cmd[7] = (offset&0xFF000000) >> 24;
-    read_block2_cmd[6] = (offset&0x00FF0000) >> 16;
-    read_block2_cmd[5] = (offset&0x0000FF00) >> 8;
-    read_block2_cmd[4] = (offset&0x000000FF);
+    read_block2_cmd[7]  = (offset&0xFF000000) >> 24;
+    read_block2_cmd[6]  = (offset&0x00FF0000) >> 16;
+    read_block2_cmd[5]  = (offset&0x0000FF00) >> 8;
+    read_block2_cmd[4]  = (offset&0x000000FF);
 
     end_offset = offset + (block_size * blocks_to_read) -1;
     read_block2_cmd[11] = (end_offset&0xFF000000) >> 24;
     read_block2_cmd[10] = (end_offset&0x00FF0000) >> 16;
-    read_block2_cmd[9] = (end_offset&0x0000FF00) >> 8;
-    read_block2_cmd[8] = (end_offset&0x000000FF);
+    read_block2_cmd[9]  = (end_offset&0x0000FF00) >> 8;
+    read_block2_cmd[8]  = (end_offset&0x000000FF);
 
     /* Read spare area ?*/
     read_block2_cmd[13] = spare_area;
@@ -358,9 +362,9 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
             printf("\n");
 
     while (pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN) && (bytes_read < bytes_to_read) && fail_cnt--) {
-//        printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
+        printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
         done_bytes = (ans_buf[4] << 24) | (ans_buf[5] << 16) | (ans_buf[6] << 8) | ans_buf[7];
-//        printf("READ_BLOCK: bytes done=%d\n", done_bytes);
+        printf("READ_BLOCK: bytes done=%d\n", done_bytes);
         if (ans_buf[1] == 0x12) {
             int buffer_size = TRANSFER_BUF_LEN;
             /* Data ready for reading*/
@@ -376,7 +380,7 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
             usleep(100000);
         } else {
             /* Unknown error, abort */
-            return -1;
+//            return -1;
         }
     }
     pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN);
@@ -387,6 +391,68 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
     return ret;
 }
 
+
+int pm_write_blocks(struct libusb_device_handle *devh, FILE *in_file, int start_offset, int blocks_to_write, int spare_area) {
+
+    int i, r, ret = 1;
+    uint8_t ans_buf[STATUS_LEN] = {0};
+    int transferred = 0;
+    int block_size, page_size, spare_area_size;
+    int pages_per_block;
+    int end_offset;
+    int fail_cnt=10000;
+    int bytes_to_write = 0, bytes_written = 0, bytes_in_bulk;
+    int done_bytes;
+    uint32_t *tmp;
+
+    uint8_t write_block_cmd[] = {0x55, 0xaa, 0x59, 0xcc, 0x11, 0x11, 0x11, 0x11,
+                                 0x22, 0x22, 0x22, 0x22, 0xcc, 0x00, 0x01, 0x01,
+                                 0x00, 0xcc, 0x66, 0xaa};
+    int write_block_cmd_len = 20;
+
+    pm_read_id(devh, 1, &block_size, &page_size, &spare_area_size);
+
+    write_block_cmd[7]  = (start_offset&0xFF000000) >> 24;
+    write_block_cmd[6]  = (start_offset&0x00FF0000) >> 16;
+    write_block_cmd[5]  = (start_offset&0x0000FF00) >> 8;
+    write_block_cmd[4]  = (start_offset&0x000000FF);
+
+    pages_per_block = block_size/page_size;
+    end_offset = start_offset + ((block_size+spare_area_size*pages_per_block) * blocks_to_write);
+    write_block_cmd[11] = (end_offset&0xFF000000) >> 24;
+    write_block_cmd[10] = (end_offset&0x00FF0000) >> 16;
+    write_block_cmd[9]  = (end_offset&0x0000FF00) >> 8;
+    write_block_cmd[8]  = (end_offset&0x000000FF);
+
+    /* Write spare area ?*/
+    write_block_cmd[13] = spare_area;
+
+    printf("Write blocks: %02x %02x %02x %02x %02x %02x %02x %02x\n", write_block_cmd[4], write_block_cmd[5], write_block_cmd[6], write_block_cmd[7], write_block_cmd[8], write_block_cmd[9], write_block_cmd[10], write_block_cmd[11]);
+    printf("Control bytes: %02x %02x %02x %02x\n", write_block_cmd[12], write_block_cmd[13], write_block_cmd[14], write_block_cmd[15]);
+
+    pm_send_bulk_out(devh, write_block_cmd, write_block_cmd_len);
+    pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN);
+    tmp = (uint32_t*)&ans_buf[4];
+    printf("WRITE_BLOCK: bytes written=%x\n", *tmp);
+
+    if (!spare_area) spare_area_size = 0;
+    pages_per_block = block_size/page_size;
+    bytes_to_write = blocks_to_write*(block_size + spare_area_size*pages_per_block);
+
+
+    while (1) {
+        int buffer_size;
+        buffer_size = fread(transfer_buffer, 1, TRANSFER_BUF_LEN, in_file);
+        printf("WB: buffer_size=%d\n", buffer_size);
+        if (!buffer_size) break;
+        usleep(10000);
+        bytes_in_bulk = pm_send_bulk_out(devh, transfer_buffer, buffer_size);
+    }
+
+    pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN);
+    tmp = (uint32_t*)&ans_buf[4];
+    printf("WRITE_BLOCK: bytes written=%x\n", *tmp);
+}
 
 int main(int argc, char** argv)
 {
@@ -399,15 +465,16 @@ int main(int argc, char** argv)
     int erase_chip = 0;
     int spare_area = 0;
     int read = 0, write = 0;
-    int read_blocks = 0;
+    int blocks = 0;
     int read_offset = 0;
+    int write_offset = 0;
     int r;
     const char* input_file = NULL;
     const char* output_file = NULL;
     FILE *in_file = NULL, *out_file = NULL;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"EBhvdlIr:b:si:o:")) != -1) {
+    while ((option = getopt(argc, argv,"EBhvdlIr:b:si:o:w:")) != -1) {
         switch (option) {
             case 'i' : input_file = optarg;
                 break;
@@ -427,7 +494,9 @@ int main(int argc, char** argv)
                 break;
             case 'r': read_offset = strtol(optarg, NULL, 16); read = 1;
                 break;
-            case 'b': read_blocks = atoi(optarg);
+            case 'w': write_offset = strtol(optarg, NULL, 16); write = 1;
+                break;
+            case 'b': blocks = atoi(optarg);
                 break;
             case 's': spare_area = 1;
                 break;
@@ -447,7 +516,7 @@ int main(int argc, char** argv)
     devh = libusb_open_device_with_vid_pid(NULL, VENDOR_ID, PRODUCT_ID);
 	if (!devh) {
         if (verbose) fprintf(stderr, "Could not find/open ProMan device\n");
-        goto out;
+        goto end;
     }
 
     if (verbose) fprintf(stdout, "Successfully found the ProMan device\n"); 
@@ -465,7 +534,7 @@ int main(int argc, char** argv)
         r = libusb_claim_interface(devh, 0);
         if (r < 0) {
             fprintf(stderr, "libusb_claim_interface error %d\n", r);
-            goto out;
+            goto end;
         }
     }
 
@@ -473,15 +542,16 @@ int main(int argc, char** argv)
 
     if (blink_led) pm_blink_led(devh);
 
-    if (probe) pm_hardware_version(devh);
+    if (probe)     pm_hardware_version(devh);
 
-    if (read_id) pm_read_id(devh, 1, NULL, NULL, NULL);
+    if (read_id)   pm_read_id(devh, 1, NULL, NULL, NULL);
 
-    if (read_bbl) pm_read_bbl(devh);
+    if (read_bbl)  pm_read_bbl(devh);
 
     if (erase_chip) {
         pm_read_id(devh, 0, NULL, NULL, NULL);   // This might be needed for the programmer to understand chip geometry
         pm_erase_chip(devh);
+        goto end;
     }
 
 
@@ -490,32 +560,35 @@ int main(int argc, char** argv)
     if (read) {
         if (output_file == NULL) {
             printf("-o output file name is missing\n");
-            goto out;
+            goto end;
         }
         out_file = fopen(output_file,"wb");
         if (out_file == NULL) {
             printf("Out file open error\n");
-            goto out;
+            goto end;
         }
 
-        pm_read_blocks(devh, out_file, read_offset, read_blocks, spare_area);
+        pm_read_blocks(devh, out_file, read_offset, blocks, spare_area);
+        goto end;
     }
 
     if (write) {
         if (input_file == NULL) {
             printf("-i input file name is missing\n");
-            goto out;
+            goto end;
         }
         in_file = fopen(input_file,"r");
         if (in_file == NULL) {
             printf("In file open error\n");
-            goto out;
+            goto end;
         }
+        pm_write_blocks(devh, in_file, write_offset, blocks, spare_area);
     }
 
 
+end:
     libusb_release_interface(devh, 0); 
-out: 
+ 
     // libusb_reset_device(devh); 
     libusb_close(devh); 
     libusb_exit(NULL); 
