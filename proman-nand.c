@@ -276,7 +276,7 @@ int pm_hardware_version(struct libusb_device_handle *devh) {
 };
 
 
-int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, int* page_size, int* spare_area_size) {
+int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, int* page_size, int* spare_area_size, int* blocks) {
     int i,r, bs, sa, ps;
     uint8_t ans_buf[READ_ID_LEN] = {0};
 
@@ -289,47 +289,69 @@ int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, 
         *block_size=0;
         *page_size=0;
         *spare_area_size=0;
+        *blocks=0;
 
         switch (ans_buf[0]) {
             case 0xec:
             case 0x98:
                 switch (ans_buf[1]) {
                     case 0xf1:
+                        *blocks=1024;
                     case 0xd3:
+                        *blocks=4096;
                     default:
-                        ps = (ans_buf[3]&0x03);
-                        *page_size = (1<<ps)*1024;
-                        bs = (ans_buf[3]&0x30)>>4;
-                        *block_size = (1<<bs)*65536;
-                        sa = (ans_buf[3]&0x04)>>2;
-                        *spare_area_size = (*page_size/512) * ((1<<sa)*8);
                         break;
                 }
         }
+        ps = (ans_buf[3]&0x03);
+        *page_size = (1<<ps)*1024;
+        bs = (ans_buf[3]&0x30)>>4;
+        *block_size = (1<<bs)*65536;
+        sa = (ans_buf[3]&0x04)>>2;
+        *spare_area_size = (*page_size/512) * ((1<<sa)*8);
+
+        
         printf("end spare_area_size: %d, %d, %d, %d\n", *spare_area_size, *page_size, *block_size, *spare_area_size);
     }
 };
 
 int pm_get_status(struct libusb_device_handle *devh) {
-    int block_size=0, page_size=0, spare_area_size=0;
+    int block_size=0, page_size=0, spare_area_size=0, blocks=0;
 
-    pm_read_id(devh, 1, &block_size, &page_size, &spare_area_size);
+    pm_read_id(devh, 1, &block_size, &page_size, &spare_area_size, &blocks);
 
     printf("block_size: %d\npage_size %d\nspare_area_size %d\n", block_size, page_size, spare_area_size);
 
 };
 
-int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset, int blocks_to_read, int spare_area) {
+void pm_fill_array(uint8_t* array, int idx, int value) {
+    int offset = idx*4;
+    array[offset+0] = (value&0x000000FF);
+    array[offset+1] = (value&0x0000FF00) >> 8;
+    array[offset+2] = (value&0x00FF0000) >> 16;
+    array[offset+3] = (value&0xFF000000) >> 24;
+};
+
+int pm_read_blocks(struct libusb_device_handle *devh, int verbose, FILE *out_file, int offset, int blocks_to_read, int spare_area) {
     int i, r, ret = 1;
     uint8_t ans_buf[STATUS_LEN] = {0};
     int transferred = 0;
-    int block_size, page_size, spare_area_size;
+    int block_size, page_size, spare_area_size, blocks;
     int pages_per_block;
     int end_offset;
-    int fail_cnt=10000;
+    int retry_cnt=10000;
     int bytes_to_read = 0, bytes_read = 0, bytes_in_bulk;
     int done_bytes;
-    uint8_t read_block1_cmd[] = {0x55, 0xaa, 0x5f, 0xcc, 0xcc, 0xcc, 0x66, 0xaa};
+//    uint8_t read_block1_cmd[] = {0x55, 0xaa, 0x5f, 0xcc, 0xcc, 0xcc, 0x66, 0xaa};
+    uint8_t set_geometry_cmd[] = {
+    0x55, 0xaa, 0x5d, 0xcc, // Start command id
+    0x00, 0x00, 0x00, 0x00, // page data size
+    0x00, 0x00, 0x00, 0x00, // page spare size
+    0x00, 0x00, 0x00, 0x00, // pages per block
+    0x00, 0x00, 0x00, 0x00, // chip select cound
+    0x00, 0x00, 0x00, 0x00, // blocks per chip selct
+    0xcc, 0xcc, 0x66, 0xaa}; // end marker
+    uint8_t set_geometry_cmd_len = 28;
     int read_block1_cmd_len = 8;
     uint8_t read_block2_cmd[] = {0x55, 0xaa, 0x5a, 0xcc, 0x11, 0x11, 0x11, 0x11,
                                  0x22, 0x22, 0x22, 0x22, 0x01, 0x00, 0x00, 0x01,
@@ -338,24 +360,36 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
 
 
     /* Reset device ? */
-    pm_send_bulk_out(devh, read_block1_cmd, read_block1_cmd_len);
-    pm_send_bulk_out(devh, read_block1_cmd, read_block1_cmd_len);
+//    pm_send_bulk_out(devh, read_block1_cmd, read_block1_cmd_len);
+//    pm_send_bulk_out(devh, read_block1_cmd, read_block1_cmd_len);
 
-    pm_read_id(devh, 0, &block_size, &page_size, &spare_area_size);
+    /* Get genometry by combining READID and table data */
+    pm_read_id(devh, 0, &block_size, &page_size, &spare_area_size, &blocks);
 
-    read_block2_cmd[7]  = (offset&0xFF000000) >> 24;
-    read_block2_cmd[6]  = (offset&0x00FF0000) >> 16;
-    read_block2_cmd[5]  = (offset&0x0000FF00) >> 8;
-    read_block2_cmd[4]  = (offset&0x000000FF);
+    /* Populate set geometry command */
+    pm_fill_array(set_geometry_cmd, 1, page_size);
+    pm_fill_array(set_geometry_cmd, 2, spare_area_size);
+    pm_fill_array(set_geometry_cmd, 3, block_size/page_size);
+    pm_fill_array(set_geometry_cmd, 4, 1);
+    pm_fill_array(set_geometry_cmd, 5, blocks);
+
+    /* Send command */
+    pm_send_bulk_out(devh, set_geometry_cmd, set_geometry_cmd_len);
+
+    /* Check status */
+    pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN);
+
+
+    /* Populate read data command */
+    pm_fill_array(read_block2_cmd, 1, offset);
 
     end_offset = offset + (block_size * blocks_to_read) -1;
-    read_block2_cmd[11] = (end_offset&0xFF000000) >> 24;
-    read_block2_cmd[10] = (end_offset&0x00FF0000) >> 16;
-    read_block2_cmd[9]  = (end_offset&0x0000FF00) >> 8;
-    read_block2_cmd[8]  = (end_offset&0x000000FF);
+    pm_fill_array(read_block2_cmd, 2, end_offset);
 
-    /* Read spare area ?*/
+    /* Read spare area */
     read_block2_cmd[13] = spare_area;
+    /* Unknown, maybe selector between automatic or manual geometry ? */
+    read_block2_cmd[14] = 1;
 
     if (!spare_area) spare_area_size = 0;
     pages_per_block = block_size/page_size;
@@ -370,12 +404,12 @@ int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset
 
     pm_send_bulk_out(devh, read_block2_cmd, read_block2_cmd_len);
 
-            printf("\n");
+    printf("\n");
 
-    while (pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN) && (bytes_read < bytes_to_read) && fail_cnt--) {
-        printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
+    while (pm_send_ctrl_in(devh, STATUS, ans_buf, STATUS_LEN) && (bytes_read < bytes_to_read) && retry_cnt--) {
+        if (verbose) printf("READ_BLOCK: %02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3]);
         done_bytes = (ans_buf[4] << 24) | (ans_buf[5] << 16) | (ans_buf[6] << 8) | ans_buf[7];
-        printf("READ_BLOCK: bytes done=%d\n", done_bytes);
+        if (verbose) printf("READ_BLOCK: bytes done=%d\n", done_bytes);
         if (ans_buf[1] == 0x12) {
             int buffer_size = TRANSFER_BUF_LEN;
             /* Data ready for reading*/
@@ -408,7 +442,7 @@ int pm_write_blocks(struct libusb_device_handle *devh, FILE *in_file, int start_
     int i, r, ret = 1;
     uint8_t ans_buf[STATUS_LEN] = {0};
     int transferred = 0;
-    int block_size, page_size, spare_area_size;
+    int block_size, page_size, spare_area_size, blocks;
     int pages_per_block;
     int end_offset;
     int fail_cnt=10000;
@@ -421,7 +455,7 @@ int pm_write_blocks(struct libusb_device_handle *devh, FILE *in_file, int start_
                                  0x00, 0xcc, 0x66, 0xaa};
     int write_block_cmd_len = 20;
 
-    pm_read_id(devh, 1, &block_size, &page_size, &spare_area_size);
+    pm_read_id(devh, 1, &block_size, &page_size, &spare_area_size, &blocks);
 
     write_block_cmd[7]  = (start_offset&0xFF000000) >> 24;
     write_block_cmd[6]  = (start_offset&0x00FF0000) >> 16;
@@ -558,14 +592,14 @@ int main(int argc, char** argv)
 
     if (probe)     pm_hardware_version(devh);
 
-    if (read_id)   pm_read_id(devh, 1, NULL, NULL, NULL);
+    if (read_id)   pm_read_id(devh, 1, NULL, NULL, NULL, NULL);
 
     if (read_bbl)  pm_read_bbl(devh);
 
     if (get_status)  pm_get_status(devh);
 
     if (erase_chip) {
-        pm_read_id(devh, 0, NULL, NULL, NULL);   // This might be needed for the programmer to understand chip geometry
+        pm_read_id(devh, 0, NULL, NULL, NULL, NULL);   // This might be needed for the programmer to understand chip geometry
         pm_erase_chip(devh);
         goto end;
     }
@@ -584,7 +618,7 @@ int main(int argc, char** argv)
             goto end;
         }
 
-        pm_read_blocks(devh, out_file, read_offset, blocks, spare_area);
+        pm_read_blocks(devh, verbose, out_file, read_offset, blocks, spare_area);
         goto end;
     }
 
