@@ -292,8 +292,10 @@ int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, 
 
         switch (ans_buf[0]) {
             case 0xec:
+            case 0x98:
                 switch (ans_buf[1]) {
                     case 0xf1:
+                    case 0xd3:
                     default:
                         ps = (ans_buf[3]&0x03);
                         *page_size = (1<<ps)*1024;
@@ -306,6 +308,15 @@ int pm_read_id(struct libusb_device_handle *devh, int verbose, int* block_size, 
         }
         printf("end spare_area_size: %d, %d, %d, %d\n", *spare_area_size, *page_size, *block_size, *spare_area_size);
     }
+};
+
+int pm_get_status(struct libusb_device_handle *devh) {
+    int block_size=0, page_size=0, spare_area_size=0;
+
+    pm_read_id(devh, 1, &block_size, &page_size, &spare_area_size);
+
+    printf("block_size: %d\npage_size %d\nspare_area_size %d\n", block_size, page_size, spare_area_size);
+
 };
 
 int pm_read_blocks(struct libusb_device_handle *devh, FILE *out_file, int offset, int blocks_to_read, int spare_area) {
@@ -468,13 +479,14 @@ int main(int argc, char** argv)
     int blocks = 0;
     int read_offset = 0;
     int write_offset = 0;
+    int get_status = 0;
     int r;
     const char* input_file = NULL;
     const char* output_file = NULL;
     FILE *in_file = NULL, *out_file = NULL;
     struct libusb_device_handle *devh = NULL;
 
-    while ((option = getopt(argc, argv,"EBhvdlIr:b:si:o:w:")) != -1) {
+    while ((option = getopt(argc, argv,"EBhvdlIr:b:si:o:w:S")) != -1) {
         switch (option) {
             case 'i' : input_file = optarg;
                 break;
@@ -499,6 +511,8 @@ int main(int argc, char** argv)
             case 'b': blocks = atoi(optarg);
                 break;
             case 's': spare_area = 1;
+                break;
+            case 'S': get_status = 1;
                 break;
             case 'h':
             default: print_usage(); 
@@ -547,6 +561,8 @@ int main(int argc, char** argv)
     if (read_id)   pm_read_id(devh, 1, NULL, NULL, NULL);
 
     if (read_bbl)  pm_read_bbl(devh);
+
+    if (get_status)  pm_get_status(devh);
 
     if (erase_chip) {
         pm_read_id(devh, 0, NULL, NULL, NULL);   // This might be needed for the programmer to understand chip geometry
