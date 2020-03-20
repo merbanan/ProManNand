@@ -272,9 +272,11 @@ int pm_read_id(pm_ctx* q) {
                 case 0xf1:
                     q->geo_blocks=1024;
                     q->manufacturer_str="Samsung";
+                    break;
                 case 0xd3:
                     q->geo_blocks=4096;
                     q->manufacturer_str="Toshiba";
+                    break;
                 default:
                     break;
             }
@@ -369,6 +371,7 @@ void pm_get_status(pm_ctx* q) {
     printf("\nNand chip geometry:\n");
     printf("block_size: %d\npage_size %d\nspare_area_size %d\n", q->block_size, q->page_size, q->spare_area_size);
     printf("blocks: %d\n", q->geo_blocks);
+    printf("pages_per_block: %d\n", q->pages_per_block);
     printf("manufacturer: %s\n", q->manufacturer_str);
 
     return;
@@ -405,6 +408,7 @@ int pm_read_bbl(pm_ctx* q) {
 
         cnt--;
     }
+    pm_blink_led(q);
 }
 
 
