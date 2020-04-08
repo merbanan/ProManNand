@@ -268,6 +268,7 @@ int pm_read_id(pm_ctx* q) {
     switch (ans_buf[0]) {
         case 0xec:
         case 0x98:
+	case 0xc2:
             switch (ans_buf[1]) {
                 case 0xf1:
                     q->geo_blocks=1024;
@@ -276,6 +277,10 @@ int pm_read_id(pm_ctx* q) {
                 case 0xd3:
                     q->geo_blocks=4096;
                     q->manufacturer_str="Toshiba";
+                    break;
+		case 0xda:
+                    q->geo_blocks=1024;
+                    q->manufacturer_str="Macronix";
                     break;
                 default:
                     break;
