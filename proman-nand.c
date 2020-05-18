@@ -271,6 +271,7 @@ int pm_read_id(pm_ctx* q) {
 	case 0xc2:
             switch (ans_buf[1]) {
                 case 0xf1:
+		case 0xf0:
                     q->geo_blocks=1024;
                     q->manufacturer_str="Samsung";
                     break;
