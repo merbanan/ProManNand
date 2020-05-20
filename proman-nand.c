@@ -617,7 +617,7 @@ int main(int argc, char** argv)
     }
 
     q->devh = libusb_open_device_with_vid_pid(NULL, VENDOR_ID, PRODUCT_ID);
-	if (!q->devh) {
+    if (!q->devh) {
         if (q->verbose) fprintf(stderr, "Could not find/open ProMan device\n");
         goto end;
     }
@@ -687,7 +687,8 @@ int main(int argc, char** argv)
 
 
 end:
-    libusb_release_interface(q->devh, 0); 
+    if(q->devh)
+        libusb_release_interface(q->devh, 0); 
  
     // libusb_reset_device(devh); 
     libusb_close(q->devh); 
