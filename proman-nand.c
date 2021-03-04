@@ -263,27 +263,63 @@ int pm_read_id(pm_ctx* q) {
     pm_send_ctrl_in(q, READ_ID, ans_buf, READ_ID_LEN);
     if (q->verbose) printf("READ_ID: %02x%02x%02x%02x%02x%02x%02x%02x\n", ans_buf[0], ans_buf[1], ans_buf[2], ans_buf[3], ans_buf[4], ans_buf[5], ans_buf[6], ans_buf[7]);
 
+    /* populate geometry */
+    ps = (ans_buf[3]&0x03);
+    q->page_size = (1<<ps)*1024;
+    bs = (ans_buf[3]&0x30)>>4;
+    q->block_size = (1<<bs)*65536;
+    sa = (ans_buf[3]&0x04)>>2;
+    q->spare_area_size = (q->page_size/512) * ((1<<sa)*8);
+    q->pages_per_block = q->block_size/q->page_size;
 
     /* parse chip vendor id data */
     switch (ans_buf[0]) {
-        case 0xec:
-        case 0x98:
-	case 0xc2:
+        case 0x01:
+            q->manufacturer_str="Spansion";
             switch (ans_buf[1]) {
                 case 0xf1:
+                    q->geo_blocks=1024; break;
+            }
+            break;
+
+        case 0xec:
+            q->manufacturer_str="Samsung";
+            switch (ans_buf[1]) {
+                case 0xf1:
+                    switch (ans_buf[4]) {
+                        case 0x01:
+                            q->geo_blocks=1024; break;
+                        default:
+                            break;
+                    }
+            }
+            break;
+
+        case 0x98:
+            q->manufacturer_str="Toshiba / Kioxia";
+            switch (ans_buf[1]) {
+                case 0xda:
                     q->geo_blocks=1024;
-                    q->manufacturer_str="Samsung";
-                    break;
+                    switch (ans_buf[4]) {
+                        case 0x76:
+                            q->geo_blocks=2048;
+                            q->spare_area_size = 128;
+                            break;
+                    }
                 case 0xd3:
-                    q->geo_blocks=4096;
-                    q->manufacturer_str="Toshiba";
-                    break;
-		        case 0xdc:
-                    q->geo_blocks=2048;
-                    q->manufacturer_str="Macronix";
-                    break;	
-		        case 0xda:
-                    q->manufacturer_str="Macronix";
+                    switch (ans_buf[4]) {
+                        case 0x76:
+                            q->geo_blocks=4096;
+                            q->spare_area_size = 128;
+                            break;
+                    }
+            }
+            break;
+
+        case 0xc2:
+            q->manufacturer_str="Macronix";
+            switch (ans_buf[1]) {
+                case 0xf1:
                     switch (ans_buf[4]) {
                         case 0x02:
                             q->geo_blocks=1024; break;
@@ -294,19 +330,10 @@ int pm_read_id(pm_ctx* q) {
                         default:
                             break;
                     }
-                    break;
-                default:
-                    break;
             }
+            break;
     }
-    /* populate geometry */
-    ps = (ans_buf[3]&0x03);
-    q->page_size = (1<<ps)*1024;
-    bs = (ans_buf[3]&0x30)>>4;
-    q->block_size = (1<<bs)*65536;
-    sa = (ans_buf[3]&0x04)>>2;
-    q->spare_area_size = (q->page_size/512) * ((1<<sa)*8);
-    q->pages_per_block = q->block_size/q->page_size;
+
 
 };
 
