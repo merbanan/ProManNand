@@ -319,7 +319,7 @@ int pm_read_id(pm_ctx* q) {
         case 0xc2:
             q->manufacturer_str="Macronix";
             switch (ans_buf[1]) {
-                case 0xf1:
+                case 0xda:
                     switch (ans_buf[4]) {
                         case 0x02:
                             q->geo_blocks=1024; break;
