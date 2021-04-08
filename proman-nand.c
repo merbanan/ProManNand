@@ -332,6 +332,22 @@ int pm_read_id(pm_ctx* q) {
                     }
             }
             break;
+        case 0x2c:
+            q->manufacturer_str="Micron";
+            switch (ans_buf[1]) {
+                case 0xda:
+                    switch (ans_buf[4]) {
+                        case 0x02:
+                            q->geo_blocks=1024; break;
+                        case 0x06:
+                            q->geo_blocks=2048; break;
+                        case 0x56:
+                            q->geo_blocks=4096; break;
+                        default:
+                            break;
+                    }
+            }
+            break;
     }
 
 
